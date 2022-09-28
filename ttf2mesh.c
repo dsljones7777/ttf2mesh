@@ -35,48 +35,17 @@
 
 /* --------------- System dependent definitions and includes ---------------- */
 
-/* General OS selection definition */
-#if defined(__linux) || defined(__linux__)
-#   define TTF_LINUX
-#   define _DEFAULT_SOURCE 1
-#   define PATH_SEP '/'
-#   include <dirent.h>
-#elif defined(__WINNT__) || defined(_WIN32) || defined(_WIN64)
-#   define TTF_WINDOWS
-#   define _CRT_SECURE_NO_WARNINGS
-#   define PATH_SEP '\\'
-#   define PATH_MAX MAX_PATH
-#   include <windows.h>
-#endif
+
 
 #include "ttf2mesh.h"
-#include <string.h>
-#include <malloc.h>
-#include <math.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <signal.h>
-
+#include "std/pmemory.h"
+#include "std/psignal.h"
+#include "std/pmath.h"
+#include <stdarg.h>
+#include "std/pstring.h"
 /* Big/little endian definitions */
-#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
-#   if (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-#       define HOST_IS_LITTLE_ENDIAN
-#   endif
-#elif defined(REG_DWORD)
-#   if (REG_DWORD == REG_DWORD_LITTLE_ENDIAN)
-#       define HOST_IS_LITTLE_ENDIAN
-#   endif
-#else
-#   error NO __BYTE_ORDER__ DEFINITION
-#endif
+#define HOST_IS_LITTLE_ENDIAN
 
-#define LINUX_FONTS_PATH      \
-    "/usr/share/fonts",       \
-    "/usr/local/share/fonts", \
-    "~/.fonts"
-
-#define WINDOWS_FONTS_PATH    \
-    "C:\\Windows\\Fonts"
 
 /* ---------------------- Different common definitions ---------------------- */
 
@@ -1624,101 +1593,7 @@ static bool try_strdup(const char *s, char **dest)
     return true;
 }
 
-int ttf_load_from_file(const char *filename, ttf_t **output, bool headers_only)
-{
-    FILE *f;
-    int result;
-    uint8_t *data;
-    int size;
-    uint32_t sfntVersion; /* 0x00010000 or 0x4F54544F ('OTTO') */
 
-    data = NULL;
-    *output = NULL;
-
-    /* open file and get it size */
-    f = fopen(filename, "rb");
-    check(f != NULL, TTF_ERR_OPEN);
-    check(fread(&sfntVersion, 1, 4, f) == 4, TTF_ERR_FMT);
-    check(big32toh(sfntVersion) == 0x00010000, TTF_ERR_FMT);
-    check(fseek(f, 0, SEEK_END) == 0, TTF_ERR_FMT);
-    size = ftell(f);
-    check(size > 0 && size < (TTF_MAX_FILE * 1024 * 1024), TTF_ERR_SIZE);
-    check(fseek(f, 0, SEEK_SET) == 0, TTF_ERR_FMT);
-
-    /* allocate memory to file content */
-    data = (uint8_t *)malloc(size);
-    check(data != NULL, TTF_ERR_NOMEM);
-
-    /* read file content */
-    check(fread(data, 1, size, f) == (size_t)size, TTF_ERR_FMT);
-
-    fclose(f);
-    result = ttf_load_from_mem(data, size, output, headers_only);
-    free(data);
-
-    if (*output != NULL)
-        try_strdup(filename, (char **)&(*output)->filename);
-
-    return result;
-
-error:
-    free(data);
-    if (f != NULL)
-        fclose(f);
-    return result;
-}
-
-#ifndef TTF_WINDOWS
-static void replace_tilda_to_home_path(char path[PATH_MAX])
-{
-    const char *homedir;
-    int hlen, plen;
-    if (path[0] != '~') return;
-    if ((homedir = getenv("HOME")) == NULL) return;
-    hlen = strlen(homedir);
-    plen = strlen(path);
-    if (hlen + plen > PATH_MAX) return;
-    memmove(path + hlen, path + 1, plen); /* and termination null too */
-    memcpy(path, homedir, hlen);
-}
-#endif
-
-static bool make_full_path(char *fullpath, const char *part)
-{
-    int dlen, flen;
-    flen = strlen(fullpath);
-    dlen = strlen(part);
-    if (flen == 0)
-    {
-        memcpy(fullpath, part, dlen + 1);
-#ifndef TTF_WINDOWS
-        replace_tilda_to_home_path(fullpath);
-#endif
-        return true;
-    }
-    if (fullpath[flen - 1] != PATH_SEP)
-    {
-        if (flen + dlen + 2 > PATH_MAX) return false;
-        fullpath[flen] = PATH_SEP;
-        memcpy(fullpath + flen + 1, part, dlen + 1);
-        return true;
-    }
-    if (flen + dlen + 1 > PATH_MAX) return false;
-    memcpy(fullpath + flen, part, dlen + 1);
-    return true;
-}
-
-static bool check_font_ext(const char *file_name)
-{
-    int len = strlen(file_name);
-    if (len < 4) return false;
-    file_name += len - 4;
-    return
-        (file_name[0] == '.') &&
-        (file_name[1] == 'T' || file_name[1] == 't') &&
-        (file_name[2] == 'T' || file_name[2] == 't') &&
-        (file_name[3] == 'F' || file_name[3] == 'f');
-}
 
 static bool single_match(const char *str, const char *pattern, int slen, int plen)
 {
@@ -1755,111 +1630,6 @@ static bool check_by_mask(const char *file_name, const char *mask)
     }
 }
 
-#if defined(TTF_LINUX)
-static ttf_t **load_fonts_from_dir(ttf_t **list, int *count, int *cap, const char *dir, char *fullpath, int deepmax, const char *mask)
-{
-    DIR *d;
-    struct dirent *entry;
-    int flen;
-
-    flen = strlen(fullpath);
-    if (!make_full_path(fullpath, dir)) return list;
-
-    d = opendir(fullpath);
-    if (d != NULL)
-        while ((entry = readdir(d)))
-        {
-            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-            if ((entry->d_type & DT_DIR) != 0)
-            {
-                if (deepmax > 0)
-                    list = load_fonts_from_dir(list, count, cap, entry->d_name, fullpath, deepmax - 1, mask);
-            }
-            else
-                if ((entry->d_type & DT_REG))
-                {
-                    ttf_t *font;
-                    int old_len = strlen(fullpath);
-                    if (!check_font_ext(entry->d_name)) continue;
-                    if (!check_by_mask(entry->d_name, mask)) continue;
-                    if (!make_full_path(fullpath, entry->d_name)) continue;
-                    ttf_load_from_file(fullpath, &font, true);
-                    fullpath[old_len] = 0;
-                    if (font == NULL)
-                        continue;
-                    if (*count == *cap - 1)
-                    {
-                        ttf_t **tmp;
-                        *cap *= 2;
-                        tmp = (ttf_t **)realloc(list, sizeof(ttf_t *) * *cap);
-                        if (tmp == NULL) break;
-                        list = tmp;
-                    }
-                    list[*count] = font;
-                    *count += 1;
-                }
-        }
-
-    if (d != NULL)
-        closedir(d);
-
-    fullpath[flen] = 0;
-
-    return list;
-}
-#elif defined(TTF_WINDOWS)
-static ttf_t **load_fonts_from_dir(ttf_t **list, int *count, int *cap, const char *dir, char *fullpath, int deepmax, const char *mask)
-{
-    HANDLE hfind;
-    WIN32_FIND_DATAA entry;
-    int flen;
-
-    flen = strlen(fullpath);
-    if (!make_full_path(fullpath, dir)) return list;
-    if (!make_full_path(fullpath, "*")) return list;
-
-    hfind = FindFirstFileA(fullpath, &entry);
-    fullpath[strlen(fullpath) - 2] = 0; /* remove "\*" tail */
-    if (hfind == INVALID_HANDLE_VALUE) return list;
-    do
-    {
-        if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
-        if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-        {
-            if (deepmax > 0)
-                list = load_fonts_from_dir(list, count, cap, entry.cFileName, fullpath, deepmax - 1, mask);
-        }
-        else
-        {
-            ttf_t *font;
-            int old_len = strlen(fullpath);
-            if (!check_font_ext(entry.cFileName)) continue;
-            if (!check_by_mask(entry.cFileName, mask)) continue;
-            if (!make_full_path(fullpath, entry.cFileName)) continue;
-            ttf_load_from_file(fullpath, &font, true);
-            fullpath[old_len] = 0;
-            if (font == NULL)
-                continue;
-            if (*count == *cap - 1)
-            {
-                ttf_t **tmp;
-                *cap *= 2;
-                tmp = (ttf_t **)realloc(list, sizeof(ttf_t *) * *cap);
-                if (tmp == NULL) break;
-                list = tmp;
-            }
-            list[*count] = font;
-            *count += 1;
-        }
-    } while (FindNextFileA(hfind, &entry) != 0);
-
-    FindClose(hfind);
-
-    fullpath[flen] = 0;
-
-    return list;
-}
-#endif
 
 static int font_list_sorting(const void *a, const void *b)
 {
@@ -1869,57 +1639,6 @@ static int font_list_sorting(const void *a, const void *b)
     return strcmp(A->names.full_name, B->names.full_name);
 }
 
-ttf_t **ttf_list_fonts(const char **directories, int dir_count, const char *mask)
-{
-    ttf_t **res;
-    int count, cap, i, n;
-    char fullpath[PATH_MAX];
-
-    if (directories == NULL || dir_count <= 0) return NULL;
-
-    count = 0;
-    cap = 64;
-    fullpath[0] = 0;
-
-    res = (ttf_t **)malloc(sizeof(ttf_t *) * cap);
-    if (res == NULL) return NULL;
-
-    for (i = 0; i < dir_count; i++)
-        res = load_fonts_from_dir(res, &count, &cap, directories[i], fullpath, 5, mask);
-
-    /* sorting list by font full_name field */
-    qsort(res, count, sizeof(ttf_t *), font_list_sorting);
-
-    /* removing duplicates from the list */
-    n = 0;
-    for (i = 0; i < count; i++)
-    {
-        if (i != count - 1)
-            if (res[i]->glyf_csum == res[i + 1]->glyf_csum)
-                if (strcmp(res[i]->names.full_name, res[i + 1]->names.full_name) == 0)
-                {
-                    ttf_free(res[i]);
-                    continue;
-                }
-        res[n++] = res[i];
-    }
-    res[n] = NULL;
-
-    return res;
-}
-
-ttf_t **ttf_list_system_fonts(const char *mask)
-{
-    static const char *directories[] = {
-#if defined(TTF_LINUX)
-        LINUX_FONTS_PATH
-#elif defined(TTF_WINDOWS)
-        WINDOWS_FONTS_PATH
-#endif
-    };
-    int dir_count = sizeof(directories) / sizeof(char *);
-    return ttf_list_fonts(directories, dir_count, mask);
-}
 
 int ttf_find_glyph(const ttf_t *ttf, uint16_t utf16)
 {
@@ -4248,68 +3967,6 @@ failed:
 /******************************************************************************/
 /******************************************************************************/
 /******************************************************************************/
-
-int ttf_export_to_obj(ttf_t *ttf, const char *file_name, uint8_t quality)
-{
-    FILE *f = fopen(file_name, "wb");
-    if (f == NULL) return TTF_ERR_OPEN;
-    if (fprintf(f, "# File generated by ttf2mesh %s\n", TTF2MESH_VERSION) == 0) goto werror;
-    if (fprintf(f, "# Font full name: %s\n", ttf->names.full_name) == 0) goto werror;
-    if (fprintf(f, "# Font family, subfamily: %s, %s\n", ttf->names.family, ttf->names.subfamily) == 0) goto werror;
-    if (fprintf(f, "# Export quality parameter: %i\n\n", (int)quality) == 0) goto werror;
-    int vtotal = 0;
-    int ttotal = 0;
-    int writed = 0;
-    int errors = 0;
-    for (int i = 0; i < ttf->nchars; i++)
-    {
-        ttf_glyph_t *g = ttf->glyphs + ttf->char2glyph[i];
-        if (fprintf(f, "o symbol U+%04X glyph %i xadv %.3f lsb %.3f rsb %.3f\n",
-                    (int)ttf->chars[i], (int)ttf->char2glyph[i], g->advance,
-                    g->lbearing, g->rbearing) == 0) goto werror;
-        bool has_data = g->outline != NULL;
-        if (has_data) has_data = g->outline->total_points >= 3;
-        if (!has_data)
-        {
-            if (fprintf(f, "# No points in this glyph\n\n") == 0) goto werror;
-            continue;
-        }
-        ttf_mesh_t *m;
-        ttf_glyph2mesh(g, &m, quality, 0);
-        if (m == NULL)
-        {
-            if (fprintf(f, "# Mesh building error\n\n") == 0) goto werror;
-            errors++;
-            continue;
-        }
-        for (int j = 0; j < m->nvert; j++)
-            if (fprintf(f, "v %.4f %.4f 0.0\n", m->vert[j].x, m->vert[j].y) == 0)
-                goto werror;
-        for (int j = 0; j < m->nfaces; j++)
-            if (fprintf(f, "f %i %i %i\n",
-                        m->faces[j].v1 + vtotal + 1,
-                        m->faces[j].v2 + vtotal + 1,
-                        m->faces[j].v3 + vtotal + 1) == 0)
-                goto werror;
-        writed++;
-        vtotal += m->nvert;
-        ttotal += m->nfaces;
-        if (fprintf(f, "# %i vertices %i triangles\n\n", m->nvert, m->nfaces) == 0)
-            goto werror;
-        ttf_free_mesh(m);
-    }
-    if (fprintf(f, "# export finished\n") == 0) goto werror;
-    if (fprintf(f, "# %i glyphs exported\n", writed) == 0) goto werror;
-    if (fprintf(f, "# %i glyphs unable to export\n", errors) == 0) goto werror;
-    if (fprintf(f, "# %i total triangles\n", ttotal) == 0) goto werror;
-    if (fprintf(f, "# %i total vertices\n", vtotal) == 0) goto werror;
-    fclose(f);
-    return TTF_DONE;
-
-werror:
-    fclose(f);
-    return TTF_ERR_WRITING;
-}
 
 void ttf_free_outline(ttf_outline_t *outline)
 {

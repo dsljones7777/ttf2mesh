@@ -76,10 +76,7 @@
 #ifndef TTF2MESH_H
 #define TTF2MESH_H
 
-#include <stddef.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdarg.h>
+#include "types.h"
 
 #ifdef __cplusplus
 extern "C" {
